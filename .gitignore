@@ -1,0 +1,172 @@
+# =========================
+# Sistema / editor
+# =========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# =========================
+# Git local / patches
+# =========================
+*.orig
+*.rej
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# =========================
+# Node / React / Vite
+# =========================
+node_modules/
+dist/
+build/
+.npm/
+.pnpm-store/
+.yarn/
+.parcel-cache/
+coverage/
+
+# =========================
+# Logs / temporários
+# =========================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.pid
+*.out
+*.err
+
+# =========================
+# Arquivos de sessão / cookies / dumps
+# =========================
+*.cookies
+*.sqlite
+*.db
+*.dump
+*.bak
+*.bak.*
+backup/
+backups/
+
+# =========================
+# Segredos / configs locais
+# =========================
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.kubeconfig
+kubeconfig
+config/local.*
+config/dev.*
+config/prod.*
+*.secret
+*.secrets
+vault.yaml
+vault.yml
+
+# =========================
+# Kubernetes / artefatos gerados
+# =========================
+generated/
+generated-jobs/
+k8s-output/
+manifests/generated/
+*.tar
+*.tar.gz
+*.tgz
+
+# imagens/export locais
+*.img
+*.qcow2
+
+# =========================
+# Docker / containers
+# =========================
+.docker/
+docker-compose.override.yml
+
+# =========================
+# Arquivos do projeto Analytics
+# =========================
+shared/
+workspace/
+output/
+artifacts/
+code-runs/
+code-runs-r/
+jobs/
+testdata/
+
+# se existir pasta local de uploads
+uploads/
+
+# =========================
+# Relatórios / artefatos de execução
+# =========================
+*.csv
+*.xlsx
+*.parquet
+*.jsonl
+result.json
+stdout.log
+stderr.log
+
+# =========================
+# Terraform / Ansible
+# =========================
+.terraform/
+*.tfstate
+*.tfstate.*
+.ansible/
+.retry
+*.retry
+
+# =========================
+# Binários
+# =========================
+*.exe
+*.dll
+*.so
+*.dylib
+
+
+# PostgreSQL data dir
+postgres-data/
+
+# PostgreSQL data dir
+postgres-data/

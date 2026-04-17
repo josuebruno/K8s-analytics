@@ -1,0 +1,38 @@
+{
+  "status": "success",
+  "rows": 4,
+  "columns": 4,
+  "column_names": [
+    "id",
+    "nome",
+    "cidade",
+    "idade"
+  ],
+  "memory_usage_bytes": 652,
+  "preview": [
+    {
+      "id": 1,
+      "nome": "Ana",
+      "cidade": "Brasilia",
+      "idade": 30
+    },
+    {
+      "id": 2,
+      "nome": "Bruno",
+      "cidade": "Rio de Janeiro",
+      "idade": 25
+    },
+    {
+      "id": 3,
+      "nome": "Carla",
+      "cidade": "Sao Paulo",
+      "idade": 41
+    },
+    {
+      "id": 4,
+      "nome": "Daniel",
+      "cidade": "Belo Horizonte",
+      "idade": 29
+    }
+  ]
+}

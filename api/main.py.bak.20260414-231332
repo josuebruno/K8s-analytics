@@ -1,0 +1,781 @@
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+import subprocess
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+import psycopg
+
+app = FastAPI(title="Analytics Job API")
+
+
+class DataSourceCreate(BaseModel):
+    name: str
+    source_type: str
+    data_format: str
+    connection_value: str
+    secret_name: str | None = None
+    description: str | None = None
+
+
+class CodeSourceCreate(BaseModel):
+    source_mode: str
+    language: str
+    inline_code: str | None = None
+    git_url: str | None = None
+    git_branch: str | None = None
+    git_file_path: str | None = None
+    git_secret_name: str | None = None
+
+
+class JobFromSourceRequest(BaseModel):
+    data_source_id: int | None = None
+    code_source_id: int
+    job_base_name: str = "analytics-job"
+    output_subdir_base: str = "run"
+    ram_limit_gb: str = "2"
+    cpus: str = "1"
+    ephemeral_storage_gb: str = "2"
+
+
+def get_db_connection():
+    return psycopg.connect(
+        host=os.environ["DB_HOST"],
+        port=os.environ["DB_PORT"],
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+    )
+
+
+def get_current_user_or_401(request: Request):
+    current_user = getattr(request.state, "user", None)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Sessão inválida ou expirada")
+    return current_user
+
+
+def is_admin(user: dict) -> bool:
+    return bool(user.get("is_admin"))
+
+
+def can_access_owned_resource(user: dict, owner_id: int | None) -> bool:
+    if is_admin(user):
+        return True
+    return owner_id is None or owner_id == user["id"]
+
+
+def parse_stdout(stdout: str):
+    job_name = None
+    result_path = None
+
+    for line in stdout.splitlines():
+        if line.startswith("Job criado:"):
+            job_name = line.split(":", 1)[1].strip()
+        elif "/opt/analytics/k8s-output/jobs/" in line and line.strip().endswith("/result.json"):
+            result_path = line.strip()
+
+    return {
+        "job_name": job_name,
+        "result_path": result_path,
+    }
+
+
+def inspect_job_runtime(job_name: str | None):
+    if not job_name:
+        return {
+            "pod_name": None,
+            "phase": None,
+            "terminated_reason": None,
+            "terminated_message": None,
+            "exit_code": None,
+        }
+
+    result = subprocess.run(
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-n",
+            "analytics-jobs",
+            "-l",
+            f"job-name={job_name}",
+            "-o",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        return {
+            "pod_name": None,
+            "phase": None,
+            "terminated_reason": None,
+            "terminated_message": result.stderr.strip() or None,
+            "exit_code": None,
+        }
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except Exception:
+        payload = {}
+
+    items = payload.get("items") or []
+    if not items:
+        return {
+            "pod_name": None,
+            "phase": None,
+            "terminated_reason": None,
+            "terminated_message": None,
+            "exit_code": None,
+        }
+
+    pod = items[0]
+    status = pod.get("status") or {}
+    container_statuses = status.get("containerStatuses") or []
+
+    terminated_reason = None
+    terminated_message = None
+    exit_code = None
+
+    if container_statuses:
+        state = container_statuses[0].get("state") or {}
+        last_state = container_statuses[0].get("lastState") or {}
+        terminated = state.get("terminated") or last_state.get("terminated")
+        if terminated:
+            terminated_reason = terminated.get("reason")
+            terminated_message = terminated.get("message") or terminated.get("reason")
+            exit_code = terminated.get("exitCode")
+
+    return {
+        "pod_name": pod.get("metadata", {}).get("name"),
+        "phase": status.get("phase"),
+        "terminated_reason": terminated_reason,
+        "terminated_message": terminated_message,
+        "exit_code": exit_code,
+    }
+
+
+def materialize_inline_code_python(job_base_name: str, code: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    base_dir = Path(os.getenv("SHARED_ROOT", "/shared")) / "code-runs" / f"{job_base_name}-{ts}"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    (base_dir / "main.py").write_text(code, encoding="utf-8")
+    return str(base_dir)
+
+
+def materialize_inline_code_r(job_base_name: str, code: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    base_dir = Path(os.getenv("SHARED_ROOT", "/shared")) / "code-runs-r" / f"{job_base_name}-{ts}"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    (base_dir / "main.R").write_text(code, encoding="utf-8")
+    return str(base_dir)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/health/db")
+def health_db():
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+        return {"status": "ok", "db": row[0]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro no banco: {e}")
+
+
+@app.get("/data-sources")
+def list_data_sources(request: Request):
+    current_user = get_current_user_or_401(request)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if is_admin(current_user):
+                cur.execute("""
+                    SELECT id, name, source_type, data_format, connection_value,
+                           secret_name, is_active, description, created_at, user_id
+                    FROM data_sources
+                    ORDER BY id
+                """)
+            else:
+                cur.execute("""
+                    SELECT id, name, source_type, data_format, connection_value,
+                           secret_name, is_active, description, created_at, user_id
+                    FROM data_sources
+                    WHERE user_id = %s OR user_id IS NULL
+                    ORDER BY id
+                """, (current_user["id"],))
+            rows = cur.fetchall()
+
+    items = []
+    for row in rows:
+        items.append({
+            "id": row[0],
+            "name": row[1],
+            "source_type": row[2],
+            "data_format": row[3],
+            "connection_value": row[4],
+            "secret_name": row[5],
+            "is_active": row[6],
+            "description": row[7],
+            "created_at": str(row[8]),
+            "user_id": row[9],
+            "owner_scope": "global" if row[9] is None else "user",
+        })
+
+    return {"success": True, "items": items}
+
+
+@app.post("/data-sources")
+def create_data_source(req: DataSourceCreate, request: Request):
+    current_user = get_current_user_or_401(request)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO data_sources (
+                    name, source_type, data_format, connection_value,
+                    secret_name, description, user_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                req.name,
+                req.source_type,
+                req.data_format,
+                req.connection_value,
+                req.secret_name,
+                req.description,
+                current_user["id"],
+            ))
+            new_id = cur.fetchone()[0]
+        conn.commit()
+
+    return {"success": True, "id": new_id, "user_id": current_user["id"]}
+
+
+@app.get("/code-sources")
+def list_code_sources(request: Request):
+    current_user = get_current_user_or_401(request)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if is_admin(current_user):
+                cur.execute("""
+                    SELECT id, source_mode, language, inline_code,
+                           git_url, git_branch, git_file_path,
+                           git_secret_name, created_at, user_id
+                    FROM code_sources
+                    ORDER BY id
+                """)
+            else:
+                cur.execute("""
+                    SELECT id, source_mode, language, inline_code,
+                           git_url, git_branch, git_file_path,
+                           git_secret_name, created_at, user_id
+                    FROM code_sources
+                    WHERE user_id = %s OR user_id IS NULL
+                    ORDER BY id
+                """, (current_user["id"],))
+            rows = cur.fetchall()
+
+    items = []
+    for row in rows:
+        items.append({
+            "id": row[0],
+            "source_mode": row[1],
+            "language": row[2],
+            "inline_code": row[3],
+            "git_url": row[4],
+            "git_branch": row[5],
+            "git_file_path": row[6],
+            "git_secret_name": row[7],
+            "created_at": str(row[8]),
+            "user_id": row[9],
+            "owner_scope": "global" if row[9] is None else "user",
+        })
+
+    return {"success": True, "items": items}
+
+
+@app.post("/code-sources")
+def create_code_source(req: CodeSourceCreate, request: Request):
+    current_user = get_current_user_or_401(request)
+
+    if req.source_mode not in ("inline", "gitlab"):
+        raise HTTPException(status_code=400, detail="source_mode deve ser 'inline' ou 'gitlab'")
+
+    if req.language not in ("python", "r", "python+r"):
+        raise HTTPException(status_code=400, detail="language deve ser 'python', 'r' ou 'python+r'")
+
+    if req.source_mode == "inline":
+        if not req.inline_code:
+            raise HTTPException(status_code=400, detail="inline_code é obrigatório para source_mode=inline")
+        if req.git_url or req.git_branch or req.git_file_path or req.git_secret_name:
+            raise HTTPException(status_code=400, detail="campos git não devem ser enviados em source_mode=inline")
+
+    if req.source_mode == "gitlab":
+        if not req.git_url:
+            raise HTTPException(status_code=400, detail="git_url é obrigatório para source_mode=gitlab")
+        if not req.git_file_path:
+            raise HTTPException(status_code=400, detail="git_file_path é obrigatório para source_mode=gitlab")
+        if req.inline_code:
+            raise HTTPException(status_code=400, detail="inline_code não deve ser enviado em source_mode=gitlab")
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO code_sources (
+                    source_mode, language, inline_code, git_url,
+                    git_branch, git_file_path, git_secret_name, user_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                req.source_mode,
+                req.language,
+                req.inline_code,
+                req.git_url,
+                req.git_branch,
+                req.git_file_path,
+                req.git_secret_name,
+                current_user["id"],
+            ))
+            new_id = cur.fetchone()[0]
+        conn.commit()
+
+    return {"success": True, "id": new_id, "user_id": current_user["id"]}
+
+
+@app.get("/job-runs")
+def list_job_runs(request: Request):
+    current_user = get_current_user_or_401(request)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if is_admin(current_user):
+                cur.execute("""
+                    SELECT id, job_name, language, status, user_id, data_source_id, code_source_id,
+                           cpu_request, memory_limit, ephemeral_storage_limit,
+                           has_data_source, result_path, log_path,
+                           started_at, finished_at, created_at
+                    FROM job_runs
+                    ORDER BY id DESC
+                """)
+            else:
+                cur.execute("""
+                    SELECT id, job_name, language, status, user_id, data_source_id, code_source_id,
+                           cpu_request, memory_limit, ephemeral_storage_limit,
+                           has_data_source, result_path, log_path,
+                           started_at, finished_at, created_at
+                    FROM job_runs
+                    WHERE user_id = %s
+                    ORDER BY id DESC
+                """, (current_user["id"],))
+            rows = cur.fetchall()
+
+    items = []
+    for row in rows:
+        items.append({
+            "id": row[0],
+            "job_name": row[1],
+            "language": row[2],
+            "status": row[3],
+            "user_id": row[4],
+            "data_source_id": row[5],
+            "code_source_id": row[6],
+            "cpu_request": row[7],
+            "memory_limit": row[8],
+            "ephemeral_storage_limit": row[9],
+            "has_data_source": row[10],
+            "result_path": row[11],
+            "log_path": row[12],
+            "started_at": str(row[13]) if row[13] else None,
+            "finished_at": str(row[14]) if row[14] else None,
+            "created_at": str(row[15]) if row[15] else None,
+        })
+
+    return {"success": True, "items": items}
+
+
+def resolve_data_source(cur, data_source_id, current_user):
+    if data_source_id is None:
+        return None
+
+    cur.execute("""
+        SELECT id, name, source_type, data_format, connection_value, is_active, user_id
+        FROM data_sources
+        WHERE id = %s
+    """, (data_source_id,))
+    ds = cur.fetchone()
+
+    if not ds:
+        raise HTTPException(status_code=404, detail="Data source não encontrado")
+
+    if ds[5] is not True:
+        raise HTTPException(status_code=400, detail="Data source inativo")
+
+    if not can_access_owned_resource(current_user, ds[6]):
+        raise HTTPException(status_code=403, detail="Você não tem permissão para usar esta data source")
+
+    return ds
+
+
+def resolve_code_source(cur, code_source_id, current_user):
+    cur.execute("""
+        SELECT id, source_mode, language, inline_code,
+               git_url, git_branch, git_file_path, git_secret_name, user_id
+        FROM code_sources
+        WHERE id = %s
+    """, (code_source_id,))
+    cs = cur.fetchone()
+
+    if not cs:
+        raise HTTPException(status_code=404, detail="Code source não encontrado")
+
+    if not can_access_owned_resource(current_user, cs[8]):
+        raise HTTPException(status_code=403, detail="Você não tem permissão para usar este code source")
+
+    return cs
+
+
+def insert_job_run(
+    req: JobFromSourceRequest,
+    parsed: dict,
+    status: str,
+    language: str,
+    started_at,
+    finished_at,
+    has_data_source: bool,
+    user_id: int | None,
+):
+    stdout_log_path = None
+    stderr_log_path = None
+
+    if parsed["result_path"]:
+        base_dir = str(Path(parsed["result_path"]).parent)
+        stdout_log_path = f"{base_dir}/stdout.log"
+        stderr_log_path = f"{base_dir}/stderr.log"
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO job_runs (
+                    job_name, language, status, user_id, data_source_id, code_source_id,
+                    cpu_request, memory_limit, ephemeral_storage_limit,
+                    has_data_source, result_path, log_path,
+                    started_at, finished_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                parsed["job_name"] or req.job_base_name,
+                language,
+                status,
+                user_id,
+                req.data_source_id,
+                req.code_source_id,
+                req.cpus,
+                req.ram_limit_gb,
+                req.ephemeral_storage_gb,
+                has_data_source,
+                parsed["result_path"],
+                stdout_log_path,
+                started_at,
+                finished_at,
+            ))
+            run_id = cur.fetchone()[0]
+        conn.commit()
+
+    return run_id, stdout_log_path, stderr_log_path
+
+
+@app.post("/run/python/by-source")
+def run_python_job_by_source(req: JobFromSourceRequest, request: Request):
+    current_user = get_current_user_or_401(request)
+
+    started_at = datetime.now(timezone.utc)
+    ds = None
+    has_data_source = req.data_source_id is not None
+    code_dir = ""
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            ds = resolve_data_source(cur, req.data_source_id, current_user)
+            cs = resolve_code_source(cur, req.code_source_id, current_user)
+
+            if cs[2] != "python":
+                raise HTTPException(status_code=400, detail="Este endpoint executa apenas code_source python")
+
+            if cs[1] == "inline":
+                if not cs[3]:
+                    raise HTTPException(status_code=400, detail="inline_code vazio")
+                code_dir = materialize_inline_code_python(req.job_base_name, cs[3])
+            elif cs[1] == "gitlab":
+                raise HTTPException(status_code=400, detail="Execução GitLab ainda será ligada no próximo passo")
+            else:
+                raise HTTPException(status_code=400, detail="source_mode inválido")
+
+    data_format = ds[3] if ds else ""
+    data_path = ds[4] if ds else ""
+
+    cmd = [
+        "/app/run-python-job-v2.sh",
+        req.job_base_name,
+        data_format,
+        data_path,
+        req.output_subdir_base,
+        req.ram_limit_gb,
+        req.cpus,
+        req.ephemeral_storage_gb,
+        code_dir,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    parsed = parse_stdout(result.stdout)
+    finished_at = datetime.now(timezone.utc)
+    status = "completed" if result.returncode == 0 else "failed"
+
+    runtime = inspect_job_runtime(parsed["job_name"])
+    oom_killed = runtime["terminated_reason"] == "OOMKilled"
+    effective_success = (result.returncode == 0) and not oom_killed
+
+    if oom_killed:
+        status = "failed"
+        display_message = "A execução excedeu o limite de memória (OOMKilled). Aumente a RAM e tente novamente."
+    elif effective_success:
+        status = "completed"
+        display_message = f"Execução concluída com sucesso. Job: {parsed['job_name']}"
+    else:
+        status = "failed"
+        display_message = "A execução falhou. Consulte stdout, stderr e logs do Job."
+
+    run_id, stdout_log_path, stderr_log_path = insert_job_run(
+        req=req,
+        parsed=parsed,
+        status=status,
+        language="python",
+        started_at=started_at,
+        finished_at=finished_at,
+        has_data_source=has_data_source,
+        user_id=current_user["id"],
+    )
+
+    return {
+        "success": effective_success,
+        "returncode": result.returncode,
+        "run_id": run_id,
+        "job_name": parsed["job_name"],
+        "result_path": parsed["result_path"],
+        "stdout_log_path": stdout_log_path,
+        "stderr_log_path": stderr_log_path,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "display_message": display_message,
+        "oom_killed": oom_killed,
+        "runtime": runtime,
+        "command": cmd,
+        "has_data_source": has_data_source,
+        "data_source": {
+            "id": ds[0],
+            "name": ds[1],
+            "source_type": ds[2],
+            "data_format": ds[3],
+            "connection_value": ds[4],
+            "user_id": ds[6],
+        } if ds else None,
+        "code_source": {
+            "id": cs[0],
+            "source_mode": cs[1],
+            "language": cs[2],
+            "git_url": cs[4],
+            "git_branch": cs[5],
+            "git_file_path": cs[6],
+            "git_secret_name": cs[7],
+            "user_id": cs[8],
+        }
+    }
+
+
+@app.post("/run/r/by-source")
+def run_r_job_by_source(req: JobFromSourceRequest, request: Request):
+    current_user = get_current_user_or_401(request)
+
+    started_at = datetime.now(timezone.utc)
+    ds = None
+    has_data_source = req.data_source_id is not None
+    code_dir = ""
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            ds = resolve_data_source(cur, req.data_source_id, current_user)
+            cs = resolve_code_source(cur, req.code_source_id, current_user)
+
+            if cs[2] != "r":
+                raise HTTPException(status_code=400, detail="Este endpoint executa apenas code_source r")
+
+            if cs[1] == "inline":
+                if not cs[3]:
+                    raise HTTPException(status_code=400, detail="inline_code vazio")
+                code_dir = materialize_inline_code_r(req.job_base_name, cs[3])
+            elif cs[1] == "gitlab":
+                raise HTTPException(status_code=400, detail="Execução GitLab para R ainda será ligada no próximo passo")
+            else:
+                raise HTTPException(status_code=400, detail="source_mode inválido")
+
+    data_format = ds[3] if ds else ""
+    data_path = ds[4] if ds else ""
+
+    cmd = [
+        "/app/run-r-job-v1.sh",
+        req.job_base_name,
+        data_format,
+        data_path,
+        req.output_subdir_base,
+        req.ram_limit_gb,
+        req.cpus,
+        req.ephemeral_storage_gb,
+        code_dir,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    parsed = parse_stdout(result.stdout)
+    finished_at = datetime.now(timezone.utc)
+    status = "completed" if result.returncode == 0 else "failed"
+
+    runtime = inspect_job_runtime(parsed["job_name"])
+    oom_killed = runtime["terminated_reason"] == "OOMKilled"
+    effective_success = (result.returncode == 0) and not oom_killed
+
+    if oom_killed:
+        status = "failed"
+        display_message = "A execução excedeu o limite de memória (OOMKilled). Aumente a RAM e tente novamente."
+    elif effective_success:
+        status = "completed"
+        display_message = f"Execução concluída com sucesso. Job: {parsed['job_name']}"
+    else:
+        status = "failed"
+        display_message = "A execução falhou. Consulte stdout, stderr e logs do Job."
+
+    run_id, stdout_log_path, stderr_log_path = insert_job_run(
+        req=req,
+        parsed=parsed,
+        status=status,
+        language="r",
+        started_at=started_at,
+        finished_at=finished_at,
+        has_data_source=has_data_source,
+        user_id=current_user["id"],
+    )
+
+    return {
+        "success": effective_success,
+        "returncode": result.returncode,
+        "run_id": run_id,
+        "job_name": parsed["job_name"],
+        "result_path": parsed["result_path"],
+        "stdout_log_path": stdout_log_path,
+        "stderr_log_path": stderr_log_path,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "display_message": display_message,
+        "oom_killed": oom_killed,
+        "runtime": runtime,
+        "command": cmd,
+        "has_data_source": has_data_source,
+        "data_source": {
+            "id": ds[0],
+            "name": ds[1],
+            "source_type": ds[2],
+            "data_format": ds[3],
+            "connection_value": ds[4],
+            "user_id": ds[6],
+        } if ds else None,
+        "code_source": {
+            "id": cs[0],
+            "source_mode": cs[1],
+            "language": cs[2],
+            "git_url": cs[4],
+            "git_branch": cs[5],
+            "git_file_path": cs[6],
+            "git_secret_name": cs[7],
+            "user_id": cs[8],
+        }
+    }
+
+
+@app.get("/result")
+def get_result(path: str):
+    result_file = Path(path)
+    if not result_file.exists():
+        raise HTTPException(status_code=404, detail="Arquivo de resultado não encontrado")
+
+    with open(result_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return {"success": True, "path": str(result_file), "data": data}
+
+
+@app.get("/logs/{job_name}")
+def get_logs(job_name: str):
+    cmd = [
+        "kubectl",
+        "logs",
+        "-n",
+        "analytics-jobs",
+        "-l",
+        f"job-name={job_name}"
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or "Erro ao obter logs")
+
+    return {"success": True, "job_name": job_name, "logs": result.stdout}
+
+
+@app.get("/file")
+def get_file(path: str):
+    file_path = Path(path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+
+    return {
+        "success": True,
+        "path": str(file_path),
+        "content": file_path.read_text(encoding="utf-8", errors="ignore")
+    }
+
+
+@app.get("/artifact")
+def get_artifact(path: str):
+    file_path = Path(path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    return FileResponse(path=file_path)
+
+
+@app.get("/download")
+def download_file(path: str):
+    file_path = Path(path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+    return FileResponse(
+        path=file_path,
+        filename=file_path.name,
+        media_type="application/octet-stream"
+    )
+
+
+from auth_routes import register_auth_routes
+register_auth_routes(app)

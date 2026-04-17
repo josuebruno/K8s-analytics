@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Plataforma Analítica</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 30px;
+      max-width: 1200px;
+      background: #f6f7fb;
+      color: #222;
+    }
+    h1, h2, h3 { margin-top: 0; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 18px;
+      margin-top: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    label {
+      display: block;
+      margin-top: 12px;
+      font-weight: bold;
+    }
+    input, select, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 6px;
+      padding: 10px;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    textarea {
+      min-height: 220px;
+      resize: vertical;
+      font-family: Consolas, monospace;
+    }
+    button {
+      cursor: pointer;
+      background: #1f6feb;
+      color: white;
+      border: none;
+    }
+    button:disabled,
+    input:disabled,
+    select:disabled,
+    textarea:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      background: #f2f2f2;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .row3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+    }
+    .muted {
+      color: #555;
+      font-size: 13px;
+    }
+    .status {
+      padding: 10px;
+      border-radius: 6px;
+      margin-top: 10px;
+      background: #eef4ff;
+      border: 1px solid #c9dcff;
+    }
+    .catalog {
+      background: #fafafa;
+      border: 1px dashed #ccc;
+      padding: 10px;
+      border-radius: 8px;
+      margin-top: 10px;
+      max-height: 250px;
+      overflow: auto;
+      font-size: 13px;
+    }
+    pre {
+      background: #111;
+      color: #0f0;
+      padding: 12px;
+      border-radius: 8px;
+      overflow: auto;
+      white-space: pre-wrap;
+      min-height: 60px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Plataforma Analítica em Kubernetes</h1>
+  <div class="status">
+    Cada execução cria um <strong>Job/Pod efêmero</strong>, com CPU, RAM e disco temporário próprios.
+    Quando termina, o container da tarefa morre.
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Cadastro de base</h2>
+
+        <label>Nome da base</label>
+        <input id="ds_name" value="clientes_csv_web">
+
+        <div class="row">
+          <div>
+            <label>Tipo</label>
+            <select id="ds_source_type">
+              <option value="file">file</option>
+              <option value="postgres">postgres</option>
+              <option value="mysql">mysql</option>
+              <option value="oracle">oracle</option>
+            </select>
+          </div>
+          <div>
+            <label>Formato</label>
+            <select id="ds_data_format">
+              <option value="csv">csv</option>
+              <option value="parquet">parquet</option>
+              <option value="json">json</option>
+              <option value="xlsx">xlsx</option>
+              <option value="table">table</option>
+            </select>
+          </div>
+        </div>
+
+        <label>Caminho / conexão</label>
+        <input id="ds_connection_value" value="/data/clientes.csv">
+
+        <label>Descrição</label>
+        <input id="ds_description" value="Base cadastrada pela interface">
+
+        <button onclick="cadastrarBase()">Cadastrar base</button>
+
+        <h3>Bases cadastradas</h3>
+        <div id="data_sources_catalog" class="catalog">Carregando...</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>Execução</h2>
+
+        <div class="row">
+          <div>
+            <label>Linguagem</label>
+            <select id="language" onchange="onLanguageChange()">
+              <option value="python">python</option>
+              <option value="r">r</option>
+              <option value="python+r">python+r</option>
+            </select>
+          </div>
+          <div>
+            <label>Origem do código</label>
+            <select id="source_mode" onchange="toggleSourceMode()">
+              <option value="inline">código local</option>
+              <option value="gitlab">gitlab</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Usar base?</label>
+            <select id="use_data_source" onchange="toggleDataSourceUsage()">
+              <option value="yes">sim</option>
+              <option value="no">não</option>
+            </select>
+          </div>
+          <div>
+            <label>Base cadastrada</label>
+            <select id="data_source_id"></select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Nome base do job</label>
+            <input id="job_base_name" value="analytics-python-web">
+          </div>
+          <div>
+            <label>Subdiretório de saída</label>
+            <input id="output_subdir_base" value="web-run">
+          </div>
+        </div>
+
+        <div class="row3">
+          <div>
+            <label>RAM (GB)</label>
+            <input id="ram_limit_gb" value="2">
+          </div>
+          <div>
+            <label>CPUs</label>
+            <input id="cpus" value="1">
+          </div>
+          <div>
+            <label>Disco temporário (GB)</label>
+            <input id="ephemeral_storage_gb" value="3">
+          </div>
+        </div>
+
+        <div id="inline_block">
+          <h3>Código local</h3>
+          <p class="muted">Se este modo estiver ativo, os campos do GitLab ficam desabilitados.</p>
+          <label>Código</label>
+          <textarea id="inline_code">print("hello from inline python")</textarea>
+        </div>
+
+        <div id="gitlab_block">
+          <h3>GitLab</h3>
+          <p class="muted">Se este modo estiver ativo, o editor local fica desabilitado.</p>
+
+          <label>URL do repositório</label>
+          <input id="git_url" value="https://gitlab.exemplo.local/grupo/projeto.git">
+
+          <div class="row">
+            <div>
+              <label>Branch</label>
+              <input id="git_branch" value="main">
+            </div>
+            <div>
+              <label>Arquivo</label>
+              <input id="git_file_path" value="main.py">
+            </div>
+          </div>
+
+          <label>Nome do secret/token</label>
+          <input id="git_secret_name" value="gitlab-token-user1">
+        </div>
+
+        <button onclick="executar()">Executar</button>
+
+        <h3>Code sources cadastrados</h3>
+        <div id="code_sources_catalog" class="catalog">Carregando...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Resposta da API</h2>
+    <pre id="api_response"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Resultado</h2>
+    <pre id="result_response"></pre>
+  </div>
+
+  <div class="card">
+    <h2>Logs</h2>
+    <pre id="logs_response"></pre>
+  </div>
+
+  <script>
+    async function apiGet(url) {
+      const resp = await fetch(url);
+      return await resp.json();
+    }
+
+    async function apiPost(url, payload) {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      return await resp.json();
+    }
+
+    function toggleSourceMode() {
+      const mode = document.getElementById("source_mode").value;
+
+      const inlineCode = document.getElementById("inline_code");
+      const gitUrl = document.getElementById("git_url");
+      const gitBranch = document.getElementById("git_branch");
+      const gitFilePath = document.getElementById("git_file_path");
+      const gitSecretName = document.getElementById("git_secret_name");
+
+      if (mode === "inline") {
+        inlineCode.disabled = false;
+        gitUrl.disabled = true;
+        gitBranch.disabled = true;
+        gitFilePath.disabled = true;
+        gitSecretName.disabled = true;
+      } else {
+        inlineCode.disabled = true;
+        gitUrl.disabled = false;
+        gitBranch.disabled = false;
+        gitFilePath.disabled = false;
+        gitSecretName.disabled = false;
+      }
+    }
+
+    function toggleDataSourceUsage() {
+      const useDataSource = document.getElementById("use_data_source").value;
+      const dataSourceId = document.getElementById("data_source_id");
+      dataSourceId.disabled = (useDataSource === "no");
+    }
+
+    function onLanguageChange() {
+      const language = document.getElementById("language").value;
+      const gitFilePath = document.getElementById("git_file_path");
+      const inlineCode = document.getElementById("inline_code");
+      const jobBaseName = document.getElementById("job_base_name");
+
+      if (language === "python") {
+        if (inlineCode.value.trim() === "" || inlineCode.value.includes("hello from inline")) {
+          inlineCode.value = 'print("hello from inline python")';
+        }
+        gitFilePath.value = "main.py";
+        jobBaseName.value = "analytics-python-web";
+      } else if (language === "r") {
+        if (inlineCode.value.trim() === "" || inlineCode.value.includes("hello from inline")) {
+          inlineCode.value = 'print("hello from inline r")';
+        }
+        gitFilePath.value = "main.R";
+        jobBaseName.value = "analytics-r-web";
+      } else {
+        inlineCode.value = '# arquivo híbrido ainda não executa\nprint("python+r selecionado")';
+        gitFilePath.value = "main.py";
+        jobBaseName.value = "analytics-hybrid-web";
+      }
+    }
+
+    async function carregarBases() {
+      const data = await apiGet("/api/data-sources");
+      const select = document.getElementById("data_source_id");
+      const catalog = document.getElementById("data_sources_catalog");
+
+      select.innerHTML = "";
+      catalog.textContent = JSON.stringify(data, null, 2);
+
+      if (data.items) {
+        data.items.forEach(item => {
+          const opt = document.createElement("option");
+          opt.value = item.id;
+          opt.textContent = `${item.id} - ${item.name} (${item.data_format})`;
+          select.appendChild(opt);
+        });
+      }
+    }
+
+    async function carregarCodeSources() {
+      const data = await apiGet("/api/code-sources");
+      document.getElementById("code_sources_catalog").textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function cadastrarBase() {
+      const payload = {
+        name: document.getElementById("ds_name").value,
+        source_type: document.getElementById("ds_source_type").value,
+        data_format: document.getElementById("ds_data_format").value,
+        connection_value: document.getElementById("ds_connection_value").value,
+        description: document.getElementById("ds_description").value
+      };
+
+      const data = await apiPost("/api/data-sources", payload);
+      document.getElementById("api_response").textContent = JSON.stringify(data, null, 2);
+      await carregarBases();
+    }
+
+    async function criarCodeSourceDinamico() {
+      const mode = document.getElementById("source_mode").value;
+      const language = document.getElementById("language").value;
+
+      if (mode === "inline") {
+        return await apiPost("/api/code-sources", {
+          source_mode: "inline",
+          language: language,
+          inline_code: document.getElementById("inline_code").value
+        });
+      }
+
+      return await apiPost("/api/code-sources", {
+        source_mode: "gitlab",
+        language: language,
+        git_url: document.getElementById("git_url").value,
+        git_branch: document.getElementById("git_branch").value,
+        git_file_path: document.getElementById("git_file_path").value,
+        git_secret_name: document.getElementById("git_secret_name").value
+      });
+    }
+
+    async function executar() {
+      const language = document.getElementById("language").value;
+      const useDataSource = document.getElementById("use_data_source").value === "yes";
+
+      document.getElementById("api_response").textContent = "Executando...";
+      document.getElementById("result_response").textContent = "";
+      document.getElementById("logs_response").textContent = "";
+
+      if (language !== "python") {
+        document.getElementById("api_response").textContent =
+          JSON.stringify({
+            success: false,
+            message: "Runner real ainda está ligado apenas ao Python. R e python+r já aparecem na interface, mas ainda não executam no backend."
+          }, null, 2);
+        return;
+      }
+
+      const codeSourceResp = await criarCodeSourceDinamico();
+      if (!codeSourceResp.success) {
+        document.getElementById("api_response").textContent = JSON.stringify(codeSourceResp, null, 2);
+        return;
+      }
+
+      await carregarCodeSources();
+
+      const payload = {
+        data_source_id: useDataSource ? parseInt(document.getElementById("data_source_id").value, 10) : null,
+        code_source_id: codeSourceResp.id,
+        job_base_name: document.getElementById("job_base_name").value,
+        output_subdir_base: document.getElementById("output_subdir_base").value,
+        ram_limit_gb: document.getElementById("ram_limit_gb").value,
+        cpus: document.getElementById("cpus").value,
+        ephemeral_storage_gb: document.getElementById("ephemeral_storage_gb").value
+      };
+
+      const runData = await apiPost("/api/run/python/by-source", payload);
+      document.getElementById("api_response").textContent = JSON.stringify(runData, null, 2);
+
+      if (runData.job_name) {
+        const logsData = await apiGet(`/api/logs/${runData.job_name}`);
+        document.getElementById("logs_response").textContent = JSON.stringify(logsData, null, 2);
+      }
+
+      if (runData.result_path) {
+        const resultData = await apiGet(`/api/result?path=${encodeURIComponent(runData.result_path)}`);
+        document.getElementById("result_response").textContent = JSON.stringify(resultData, null, 2);
+      }
+    }
+
+    async function init() {
+      toggleSourceMode();
+      toggleDataSourceUsage();
+      await carregarBases();
+      await carregarCodeSources();
+    }
+
+    init();
+  </script>
+</body>
+</html>

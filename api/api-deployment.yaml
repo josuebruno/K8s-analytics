@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-api
+  namespace: analytics-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-api
+  template:
+    metadata:
+      labels:
+        app: analytics-api
+    spec:
+      serviceAccountName: analytics-api
+      nodeSelector:
+        kubernetes.io/hostname: masterlab01
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: api
+          image: localhost/analytics-api:1.0
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_HOST
+              value: analytics-postgres.analytics-system.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: analytics-postgres-secret
+                  key: POSTGRES_DB
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: analytics-postgres-secret
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: analytics-postgres-secret
+                  key: POSTGRES_PASSWORD
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /root/.kube
+              cat > /root/.kube/config <<KCFG
+              apiVersion: v1
+              kind: Config
+              clusters:
+              - cluster:
+                  certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  server: https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS}
+                name: in-cluster
+              contexts:
+              - context:
+                  cluster: in-cluster
+                  namespace: analytics-system
+                  user: serviceaccount
+                name: in-cluster
+              current-context: in-cluster
+              users:
+              - name: serviceaccount
+                user:
+                  tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+              KCFG
+              uvicorn main:app --host 0.0.0.0 --port 8000
+          volumeMounts:
+            - name: jobs-output
+              mountPath: /opt/analytics/k8s-output/jobs
+            - name: generated-jobs
+              mountPath: /opt/analytics/generated-jobs
+            - name: code-runs
+              mountPath: /opt/analytics/code-runs
+            - name: code-runs-r
+              mountPath: /opt/analytics/code-runs-r
+      volumes:
+        - name: jobs-output
+          hostPath:
+            path: /opt/analytics/k8s-output/jobs
+            type: DirectoryOrCreate
+        - name: generated-jobs
+          hostPath:
+            path: /opt/analytics/generated-jobs
+            type: DirectoryOrCreate
+        - name: code-runs
+          hostPath:
+            path: /opt/analytics/code-runs
+            type: DirectoryOrCreate
+        - name: code-runs-r
+          hostPath:
+            path: /opt/analytics/code-runs-r
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-api
+  namespace: analytics-system
+spec:
+  type: NodePort
+  selector:
+    app: analytics-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30080
