@@ -661,10 +661,11 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
       };
     } else if (baseType === "nfs") {
       connection_json = {
-        server: baseNfsServer,
-        export_path: baseNfsExport,
-        path: baseNfsPath,
-        version: baseNfsVersion,
+        server: baseNfsServer.trim(),
+        export_path: baseNfsExport.trim(),
+        mount_mode: "input_file",
+        path: baseNfsPath.trim(),
+        version: (baseNfsVersion || "4.1").trim(),
         vault_vars: baseNfsVaultVars.trim() ? JSON.parse(baseNfsVaultVars) : {},
       };
     } else {
