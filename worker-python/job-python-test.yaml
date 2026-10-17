@@ -3,47 +3,74 @@ kind: Job
 metadata:
   name: analytics-python-test
   namespace: analytics-jobs
+
+  labels:
+    app: analytics-worker
+    language: python
+    purpose: test
+
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 300
+
   template:
+    metadata:
+      labels:
+        app: analytics-worker
+        language: python
+        purpose: test
+
     spec:
       restartPolicy: Never
+
       nodeSelector:
-        kubernetes.io/hostname: masterlab01
-      tolerations:
-        - key: "node-role.kubernetes.io/control-plane"
-          operator: "Exists"
-          effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
+        analytics-worker: "true"
+
+      automountServiceAccountToken: false
+
+      imagePullSecrets:
+        - name: harbor-analytics
+
       containers:
         - name: worker
-          image: localhost/analytics-worker-python:1.0
-          imagePullPolicy: Never
+          image: harbor.ipea.gov.br/desenvolvimento/analytics-worker-python:2.0
+          imagePullPolicy: IfNotPresent
+
           args:
             - "--data-format"
             - "csv"
+
             - "--data-path"
             - "/data/clientes.csv"
+
             - "--ram-limit-gb"
             - "2"
+
             - "--cpus"
             - "1"
+
             - "--output-dir"
             - "/output"
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
           volumeMounts:
-            - name: input-data
+            - name: shared-data
               mountPath: /data
-            - name: output-data
+              subPath: testdata
+
+            - name: shared-data
               mountPath: /output
+              subPath: jobs
+
       volumes:
-        - name: input-data
-          hostPath:
-            path: /opt/analytics/testdata
-            type: Directory
-        - name: output-data
-          hostPath:
-            path: /opt/analytics/k8s-output
-            type: DirectoryOrCreate
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: analytics-shared-pvc

@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: analytics-python-template
+  namespace: analytics-jobs
+  labels:
+    app: analytics-worker
+    language: python
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: analytics-worker
+        language: python
+    spec:
+      serviceAccountName: default
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: masterlab01
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: worker
+          image: localhost/analytics-worker-python:1.0
+          imagePullPolicy: Never
+          args:
+            - "--data-format"
+            - "csv"
+            - "--data-path"
+            - "/data/clientes.csv"
+            - "--ram-limit-gb"
+            - "2"
+            - "--cpus"
+            - "1"
+            - "--output-dir"
+            - "/output"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: input-data
+              mountPath: /data
+            - name: output-data
+              mountPath: /output
+      volumes:
+        - name: input-data
+          hostPath:
+            path: /opt/analytics/testdata
+            type: Directory
+        - name: output-data
+          hostPath:
+            path: /opt/analytics/k8s-output/jobs
+            type: DirectoryOrCreate

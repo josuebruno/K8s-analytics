@@ -12,6 +12,11 @@ CODE_HOST_DIR="${8:-}"
 CODE_ENTRY_FILE="${9:-main.py}"
 
 SHARED_ROOT="${SHARED_ROOT:-/shared}"
+
+WORKER_PYTHON_IMAGE="${WORKER_PYTHON_IMAGE:-harbor.ipea.gov.br/desenvolvimento/analytics-worker-python:2.0}"
+WORKER_IMAGE_PULL_POLICY="${WORKER_IMAGE_PULL_POLICY:-IfNotPresent}"
+HARBOR_IMAGE_PULL_SECRET="${HARBOR_IMAGE_PULL_SECRET:-harbor-analytics}"
+
 CODE_ENTRY_FILE="${CODE_ENTRY_FILE#/}"
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -72,13 +77,20 @@ spec:
         language: python
     spec:
       serviceAccountName: default
+      automountServiceAccountToken: false
       restartPolicy: Never
+
+      imagePullSecrets:
+        - name: ${HARBOR_IMAGE_PULL_SECRET}
+
       nodeSelector:
         analytics-worker: "true"
+
       containers:
         - name: worker
-          image: localhost/analytics-worker-python:1.0
-          imagePullPolicy: Never
+          image: ${WORKER_PYTHON_IMAGE}
+          imagePullPolicy: ${WORKER_IMAGE_PULL_POLICY}
+
           args:
 ${DATA_ARGS}
 ${CODE_ARGS}
@@ -88,6 +100,7 @@ ${CODE_ARGS}
             - "${CPUS}"
             - "--output-dir"
             - "${SHARED_ROOT}/jobs/${OUTPUT_SUBDIR}"
+
           resources:
             requests:
               cpu: "${CPUS}"
@@ -97,10 +110,12 @@ ${CODE_ARGS}
               cpu: "${CPUS}"
               memory: "${RAM_LIMIT_GB}Gi"
               ephemeral-storage: "${EPHEMERAL_STORAGE_GB}Gi"
+
           volumeMounts:
             - name: shared-data
               mountPath: ${SHARED_ROOT}
 ${DATA_VOLUME_MOUNT}
+
       volumes:
         - name: shared-data
           persistentVolumeClaim:
@@ -108,14 +123,23 @@ ${DATA_VOLUME_MOUNT}
 YAML
 
 echo "Manifesto gerado em: ${MANIFEST_FILE}"
+echo "Imagem Python: ${WORKER_PYTHON_IMAGE}"
+
 kubectl apply -f "${MANIFEST_FILE}"
+
 echo "Job criado: ${JOB_NAME}"
 
-kubectl wait --for=condition=complete --timeout=300s job/${JOB_NAME} -n analytics-jobs || true
+kubectl wait \
+  --for=condition=complete \
+  --timeout=300s \
+  job/${JOB_NAME} \
+  -n analytics-jobs || true
 
 echo
 echo "Logs do job:"
-kubectl logs -n analytics-jobs -l job-name=${JOB_NAME} || true
+kubectl logs \
+  -n analytics-jobs \
+  -l job-name=${JOB_NAME} || true
 
 echo
 echo "Resultado esperado em:"

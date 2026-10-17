@@ -3,56 +3,107 @@ kind: Deployment
 metadata:
   name: analytics-api
   namespace: analytics-system
+
 spec:
   replicas: 1
+
   selector:
     matchLabels:
       app: analytics-api
+
   template:
     metadata:
       labels:
         app: analytics-api
+
     spec:
       serviceAccountName: analytics-api
+
       nodeSelector:
-        kubernetes.io/hostname: masterlab01
-      tolerations:
-        - key: "node-role.kubernetes.io/control-plane"
-          operator: "Exists"
-          effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
+        analytics-worker: "true"
+
+      imagePullSecrets:
+        - name: harbor-analytics
+
       containers:
         - name: api
-          image: localhost/analytics-api:1.0
-          imagePullPolicy: Never
+          image: harbor.ipea.gov.br/desenvolvimento/analytics-api:2.1
+          imagePullPolicy: IfNotPresent
+
           ports:
             - containerPort: 8000
+              protocol: TCP
+
           env:
+            # PostgreSQL
             - name: DB_HOST
               value: analytics-postgres.analytics-system.svc.cluster.local
+
             - name: DB_PORT
               value: "5432"
+
             - name: DB_NAME
               valueFrom:
                 secretKeyRef:
                   name: analytics-postgres-secret
                   key: POSTGRES_DB
+
             - name: DB_USER
               valueFrom:
                 secretKeyRef:
                   name: analytics-postgres-secret
                   key: POSTGRES_USER
+
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: analytics-postgres-secret
                   key: POSTGRES_PASSWORD
-          command: ["/bin/sh", "-c"]
+
+            # Active Directory
+            - name: AD_HOST
+              value: "10.1.1.70"
+
+            - name: AD_PORT
+              value: "389"
+
+            - name: AD_USE_SSL
+              value: "false"
+
+            - name: AD_DOMAIN
+              value: "IPEA.GOV.BR"
+
+            - name: AD_BASE_DN
+              value: "DC=ipea,DC=gov,DC=br"
+
+            - name: AD_GROUP_CN
+              value: "GestaoAD"
+
+            # Sessão
+            - name: SESSION_COOKIE_NAME
+              value: "analytics_session"
+
+            - name: SESSION_TTL_HOURS
+              value: "12"
+
+            # Storage compartilhado
+            - name: SHARED_ROOT
+              value: "/shared"
+
+            - name: SHARED_NFS_SERVER
+              value: "10.100.58.50"
+
+            - name: SHARED_NFS_EXPORT
+              value: "/1"
+
+          command:
+            - /bin/sh
+            - -c
+
           args:
             - |
               mkdir -p /root/.kube
+
               cat > /root/.kube/config <<KCFG
               apiVersion: v1
               kind: Config
@@ -73,44 +124,50 @@ spec:
                 user:
                   tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
               KCFG
+
               uvicorn main:app --host 0.0.0.0 --port 8000
+
           volumeMounts:
-            - name: jobs-output
+            - name: shared-data
+              mountPath: /shared
+
+            - name: shared-data
               mountPath: /opt/analytics/k8s-output/jobs
-            - name: generated-jobs
+              subPath: jobs
+
+            - name: shared-data
               mountPath: /opt/analytics/generated-jobs
-            - name: code-runs
+              subPath: generated-jobs
+
+            - name: shared-data
               mountPath: /opt/analytics/code-runs
-            - name: code-runs-r
+              subPath: code-runs
+
+            - name: shared-data
               mountPath: /opt/analytics/code-runs-r
+              subPath: code-runs-r
+
       volumes:
-        - name: jobs-output
-          hostPath:
-            path: /opt/analytics/k8s-output/jobs
-            type: DirectoryOrCreate
-        - name: generated-jobs
-          hostPath:
-            path: /opt/analytics/generated-jobs
-            type: DirectoryOrCreate
-        - name: code-runs
-          hostPath:
-            path: /opt/analytics/code-runs
-            type: DirectoryOrCreate
-        - name: code-runs-r
-          hostPath:
-            path: /opt/analytics/code-runs-r
-            type: DirectoryOrCreate
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: analytics-shared-pvc
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: analytics-api
   namespace: analytics-system
+
 spec:
   type: NodePort
+
   selector:
     app: analytics-api
+
   ports:
-    - port: 8000
+    - name: http
+      protocol: TCP
+      port: 8000
       targetPort: 8000
       nodePort: 30080
