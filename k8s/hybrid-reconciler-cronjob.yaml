@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: analytics-hybrid-reconciler
+  namespace: analytics-system
+  labels:
+    app: analytics-hybrid-reconciler
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 50
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 240
+      ttlSecondsAfterFinished: 600
+      template:
+        spec:
+          serviceAccountName: analytics-api
+          restartPolicy: Never
+          nodeSelector:
+            analytics-worker: "true"
+          imagePullSecrets:
+            - name: harbor-analytics
+          containers:
+            - name: reconciler
+              image: harbor.ipea.gov.br/desenvolvimento/analytics-api:2.4
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  mkdir -p /root/.kube
+                  cat > /root/.kube/config <<KCFG
+                  apiVersion: v1
+                  kind: Config
+                  clusters:
+                  - cluster:
+                      certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                      server: https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS}
+                    name: in-cluster
+                  contexts:
+                  - context:
+                      cluster: in-cluster
+                      namespace: analytics-jobs
+                      user: serviceaccount
+                    name: in-cluster
+                  current-context: in-cluster
+                  users:
+                  - name: serviceaccount
+                    user:
+                      tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+                  KCFG
+                  exec python /app/hybrid_runner.py reconcile-all --max-runs 1000
+              env:
+                - name: SHARED_ROOT
+                  value: /shared
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: shared-data
+                  mountPath: /shared
+          volumes:
+            - name: shared-data
+              persistentVolumeClaim:
+                claimName: analytics-shared-pvc

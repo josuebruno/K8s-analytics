@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "56"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"annotations":{},"name":"analytics-frontend-modern","namespace":"analytics-system"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"analytics-frontend-modern"}},"template":{"metadata":{"labels":{"app":"analytics-frontend-modern"}},"spec":{"containers":[{"image":"harbor.ipea.gov.br/desenvolvimento/analytics-frontend-modern:2.7","imagePullPolicy":"IfNotPresent","name":"frontend","ports":[{"containerPort":80,"protocol":"TCP"}]}],"imagePullSecrets":[{"name":"harbor-analytics"}]}}}}
+  creationTimestamp: "2026-04-10T13:49:46Z"
+  generation: 56
+  name: analytics-frontend-modern
+  namespace: analytics-system
+  resourceVersion: "25102736"
+  uid: 28f7c961-e659-42cc-9e1f-6675465e3f2f
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: analytics-frontend-modern
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-04-20T02:09:34Z"
+      labels:
+        app: analytics-frontend-modern
+    spec:
+      containers:
+      - image: harbor.ipea.gov.br/desenvolvimento/analytics-frontend-modern:3.3
+        imagePullPolicy: IfNotPresent
+        name: frontend
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+      - name: harbor-analytics
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+status:
+  availableReplicas: 1
+  conditions:
+  - lastTransitionTime: "2026-09-04T16:08:17Z"
+    lastUpdateTime: "2026-09-04T16:08:17Z"
+    message: Deployment has minimum availability.
+    reason: MinimumReplicasAvailable
+    status: "True"
+    type: Available
+  - lastTransitionTime: "2026-04-10T13:49:46Z"
+    lastUpdateTime: "2026-10-18T00:50:27Z"
+    message: ReplicaSet "analytics-frontend-modern-7c9cc979b7" has successfully progressed.
+    reason: NewReplicaSetAvailable
+    status: "True"
+    type: Progressing
+  observedGeneration: 56
+  readyReplicas: 1
+  replicas: 1
+  terminatingReplicas: 0
+  updatedReplicas: 1

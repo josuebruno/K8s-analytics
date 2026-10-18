@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import AdminDashboard from "./AdminDashboard";
 import {
   Play,
   Cpu,
@@ -186,6 +187,7 @@ function sourceTypeIcon(type) {
 export default function App() {
   const [authChecking, setAuthChecking] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
+  const [adminPage, setAdminPage] = useState(() => window.location.pathname === "/admin");
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
@@ -316,6 +318,12 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
   const [baseSqlPassword, setBaseSqlPassword] = useState("");
 
   const [inlineCode, setInlineCode] = useState(INITIAL_PYTHON);
+  const [hybridPythonCode, setHybridPythonCode] = useState(INITIAL_PYTHON);
+  const [hybridRCode, setHybridRCode] = useState(INITIAL_R);
+  const [hybridMode, setHybridMode] = useState("parallel");
+  const [singleAsyncRunId, setSingleAsyncRunId] = useState(null);
+  const [hybridRunId, setHybridRunId] = useState(null);
+  const [hybridStatus, setHybridStatus] = useState(null);
   const [gitCredentials, setGitCredentials] = useState([]);
   const [selectedGitCredentialId, setSelectedGitCredentialId] = useState("");
   const [gitUrl, setGitUrl] = useState("https://github.com/usuario/repositorio.git");
@@ -483,6 +491,38 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
     }
   }, [currentUser]);
 
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    const restoreRunningJob = async () => {
+      try {
+        const params = new URLSearchParams({ status: "running", page: "1", page_size: "1" });
+        const data = await apiGet(`/job-runs?${params.toString()}`);
+        if (cancelled || !data?.items?.length) return;
+        const job = data.items[0];
+        setSingleAsyncRunId((previous) => previous || job.id);
+        setRunState("running");
+        setStatusMessage(`Execução ${job.id} (${job.job_name}) recuperada do histórico. Acompanhando...`);
+      } catch (e) {
+        if (!cancelled) console.warn("Não foi possível recuperar execução ativa:", e);
+      }
+    };
+    restoreRunningJob();
+    return () => { cancelled = true; };
+  }, [currentUser]);
+
+  function followJobRun(job) {
+    if (!job?.id) return;
+    setSingleAsyncRunId(job.id);
+    setRunState("running");
+    setResultResponse(null);
+    setStdoutResponse(null);
+    setStderrResponse(null);
+    setLogsResponse(null);
+    setStatusMessage(`Acompanhando execução ${job.id}: ${job.job_name}`);
+  }
+
+
   function applyPreset(name) {
     const preset = PRESETS[name];
     if (!preset) return;
@@ -495,7 +535,9 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
   function onLanguageChange(value) {
     setLanguage(value);
     setValidationErrors([]);
-    setRunState("idle");
+    setRunState(singleAsyncRunId ? "running" : "idle");
+    setHybridRunId(null);
+    setHybridStatus(null);
 
     if (value === "python") {
       setInlineCode(INITIAL_PYTHON);
@@ -532,7 +574,11 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
     if (storage > SAFE_LIMITS.diskMax) errors.push(`Disco máximo permitido na interface: ${SAFE_LIMITS.diskMax} GiB.`);
 
     if (useDataSource && !selectedDataSource) errors.push("Selecione uma base cadastrada ou desative o uso de base.");
-    if (sourceMode === "inline" && !inlineCode.trim()) errors.push("O código inline não pode ficar vazio.");
+    if (language === "python+r") {
+      if (sourceMode !== "inline") errors.push("R + Python inicialmente suporta código inline.");
+      if (!hybridPythonCode.trim()) errors.push("Informe o código Python.");
+      if (!hybridRCode.trim()) errors.push("Informe o código R.");
+    } else if (sourceMode === "inline" && !inlineCode.trim()) errors.push("O código inline não pode ficar vazio.");
     if (sourceMode === "git" && !gitUrl.trim()) errors.push("Informe a URL do repositório Git.");
     if (sourceMode === "git" && !gitEntryFile.trim()) errors.push("Informe o arquivo principal do repositório.");
 
@@ -590,6 +636,7 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
     setStderrResponse(null);
     setLogsResponse(null);
     setJobRunsResponse(null);
+    setSingleAsyncRunId(null);
     setRunState("idle");
     setStatusMessage("Sessão encerrada.");
   }
@@ -880,8 +927,20 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
 
     try {
       if (language === "python+r") {
-        setRunState("failed");
-        setStatusMessage("O runner híbrido python+r ainda não foi ligado na interface.");
+        const response = await apiPost("/run/hybrid", {
+          run_name: runName,
+          python_code: hybridPythonCode,
+          r_code: hybridRCode,
+          execution_mode: hybridMode,
+          ram_limit_gb: Number(ram),
+          cpus: Number(cpus),
+          ephemeral_storage_gb: Number(disk),
+        });
+        setHybridRunId(response.run_id);
+        setHybridStatus(response);
+        setApiResponse(response);
+        setRunState("running");
+        setStatusMessage(`Execução híbrida criada: ${response.run_id}. Acompanhando os Jobs...`);
         return;
       }
 
@@ -889,8 +948,8 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
 
       const runEndpoint =
         language === "r"
-          ? "/run/r/by-source"
-          : "/run/python/by-source";
+          ? "/run/r/async"
+          : "/run/python/async";
 
       setRunState("running");
       setStatusMessage("Job enviado. Aguardando conclusão da execução...");
@@ -906,7 +965,9 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
         ephemeral_storage_gb: disk,
       });
 
-      await consumeRunResponse(run);
+      setSingleAsyncRunId(run.run_id);
+      setApiResponse(run);
+      setStatusMessage(`Job ${run.job_name} enviado. Processamento em andamento.`);
       await loadJobRuns(1);
     } catch (e) {
       const err = normalizeRunError(e.message);
@@ -917,6 +978,67 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
       setExecuting(false);
     }
   }
+
+  useEffect(() => {
+    if (!currentUser || !hybridRunId || (hybridStatus?.status !== "running")) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await apiGet(`/run/hybrid/${hybridRunId}`);
+        if (cancelled) return;
+        setHybridStatus(status);
+        setApiResponse(status);
+        if (status.status !== "running") {
+          setRunState(status.status === "completed" ? "completed" : "failed");
+          setStatusMessage(status.status === "completed" ?
+            "Python e R finalizados com sucesso." : "Execução híbrida falhou; consulte os estados das etapas.");
+        }
+      } catch (e) {
+        if (!cancelled) setStatusMessage(`Falha ao consultar execução híbrida: ${e.message}`);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [currentUser, hybridRunId, hybridStatus?.status]);
+
+  useEffect(() => {
+    if (!currentUser || !singleAsyncRunId) return;
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const state = await apiGet(`/job-runs/${singleAsyncRunId}/status`);
+        if (cancelled) return;
+        if (state.status === "completed") {
+          setSingleAsyncRunId(null);
+          setRunState("completed");
+          setStatusMessage("Processamento concluído. Carregando resultado...");
+          try {
+            await consumeRunResponse({ ...state, success: true });
+          } catch (e) {
+            setStatusMessage(`Execução concluída; falha ao carregar resultado: ${e.message}`);
+          }
+          await loadJobRuns(1);
+          return;
+        }
+        if (state.status === "failed") {
+          setSingleAsyncRunId(null);
+          setRunState("failed");
+          setStatusMessage(`Job ${state.job_name} falhou. Consulte os logs.`);
+          await loadJobRuns(1);
+          return;
+        }
+        setRunState("running");
+        setStatusMessage(state.display_message || `Job ${state.job_name}: ${state.status}`);
+      } catch (e) {
+        if (!cancelled) setStatusMessage(`Erro ao consultar status: ${e.message}`);
+      }
+      if (!cancelled) timer = setTimeout(poll, 5000);
+    };
+    poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [currentUser, singleAsyncRunId]);
 
   async function consumeRunResponse(run) {
     setApiResponse(run);
@@ -1091,6 +1213,14 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
     );
   }
 
+  if (adminPage && currentUser?.is_admin === true) {
+    return <AdminDashboard
+      currentUser={currentUser}
+      onWorkspace={() => { window.history.pushState({}, "", "/"); setAdminPage(false); }}
+      onLogout={handleLogout}
+    />;
+  }
+
   return (
     <div className="page">
       <div className="topbar">
@@ -1102,6 +1232,9 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
           </div>
         </div>
 
+        {currentUser?.is_admin === true && <button className="logoutBtn" onClick={() => {window.history.pushState({}, "", "/admin"); setAdminPage(true);}}>
+          <ShieldCheck size={16}/> Administração
+        </button>}
         <button className="logoutBtn" onClick={handleLogout}>
           <LogOut size={16} />
           Sair
@@ -1194,6 +1327,7 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
 
               <select value={jobRunsStatus} onChange={(e) => setJobRunsStatus(e.target.value)}>
                 <option value="">Todos status</option>
+                <option value="running">running</option>
                 <option value="completed">completed</option>
                 <option value="failed">failed</option>
               </select>
@@ -1252,6 +1386,12 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
                         <td>{job.created_at || "-"}</td>
                         <td>
                           <div className="actionsInline">
+                            {job.status === "running" && (
+                              <button className="miniBtn" title="Acompanhar execução" onClick={() => followJobRun(job)}>
+                                <RefreshCcw size={14} />
+                                <span>Acompanhar</span>
+                              </button>
+                            )}
                             <button className="miniBtn" onClick={() => rerunJob(job.id)}>
                               <RotateCcw size={14} />
                             </button>
@@ -1434,7 +1574,52 @@ O caminho informado no formulário vira um caminho visível dentro do pod, por e
               </div>
             </div>
 
-            {sourceMode === "inline" ? (
+            {language === "python+r" && sourceMode === "inline" ? (
+              <div>
+                <label>Modo de execução</label>
+                <select value={hybridMode} onChange={(e) => setHybridMode(e.target.value)}>
+                  <option value="parallel">Python e R em paralelo</option>
+                  <option value="python_then_r">Python → R</option>
+                  <option value="r_then_python">R → Python</option>
+                </select>
+                <p>CPU e RAM são limites por tarefa. Dados compartilhados ficam em /shared/hybrid-runs/&lt;ID&gt;/.</p>
+                <div className="grid2">
+                  <div className="editorWrap">
+                    <div className="editorTop"><span className="editorFile">main.py — Python</span></div>
+                    <textarea className="editor" value={hybridPythonCode}
+                      onChange={(e) => setHybridPythonCode(e.target.value)} />
+                  </div>
+                  <div className="editorWrap">
+                    <div className="editorTop"><span className="editorFile">main.R — R</span></div>
+                    <textarea className="editor" value={hybridRCode}
+                      onChange={(e) => setHybridRCode(e.target.value)} />
+                  </div>
+                </div>
+                {hybridStatus && (
+                  <div className="card">
+                    <h3>Execução híbrida: {hybridStatus.status}</h3>
+                    <p>ID: {hybridStatus.run_id}</p>
+                    <p>Python: {hybridStatus.stages?.python?.status} — {hybridStatus.stages?.python?.job_name}</p>
+                    <p>R: {hybridStatus.stages?.r?.status} — {hybridStatus.stages?.r?.job_name}</p>
+                    <p>Resultados: /shared/hybrid-runs/{hybridStatus.run_id}/</p>
+                    {['python', 'r'].map((lang) => (
+                      <div key={lang}>
+                        <strong>{lang.toUpperCase()} — Resultado</strong>
+                        <pre style={{ whiteSpace: 'pre-wrap' }}>
+                          {hybridStatus.stages?.[lang]?.result?.stdout_preview ||
+                           hybridStatus.stages?.[lang]?.result?.stderr_preview || 'Aguardando resultado...'}
+                        </pre>
+                        {(hybridStatus.stages?.[lang]?.result?.artifacts || []).map((file) => (
+                          <p key={file.path}>Artefato: {file.name} — {file.path}</p>
+                        ))}
+                      </div>
+                    ))}
+                    {hybridStatus.stages?.python?.error && <p>Erro Python: {hybridStatus.stages.python.error}</p>}
+                    {hybridStatus.stages?.r?.error && <p>Erro R: {hybridStatus.stages.r.error}</p>}
+                  </div>
+                )}
+              </div>
+            ) : sourceMode === "inline" ? (
               <div className="editorWrap">
                 <div className="editorTop">
                   <div className="editorDots">

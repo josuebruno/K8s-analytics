@@ -1,0 +1,21 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: analytics-admin-nodes-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: analytics-admin-nodes-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: analytics-api
+    namespace: analytics-system
+roleRef:
+  kind: ClusterRole
+  name: analytics-admin-nodes-reader
+  apiGroup: rbac.authorization.k8s.io

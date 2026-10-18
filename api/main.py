@@ -567,6 +567,7 @@ def execute_job_from_source(
     request: Request,
     forced_language: str | None = None,
     rerun_from_id: int | None = None,
+    async_submit: bool = False,
 ):
     current_user = get_current_user_or_401(request)
     started_at = datetime.now(timezone.utc)
@@ -652,15 +653,22 @@ def execute_job_from_source(
             code_entry_file,
         ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=run_env)
+    if async_submit:
+        run_env["ASYNC_SUBMIT"] = "1"
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=run_env, timeout=90)
     parsed = parse_stdout(result.stdout)
     runtime = inspect_job_runtime(parsed["job_name"])
     finished_at = datetime.now(timezone.utc)
 
     oom_killed = runtime["terminated_reason"] == "OOMKilled"
     effective_success = (result.returncode == 0) and not oom_killed
+    if async_submit and (result.returncode != 0 or not parsed["job_name"] or not parsed["result_path"]):
+        raise HTTPException(status_code=502, detail="Falha ao submeter Job ao Kubernetes; verifique os logs da API")
 
-    if oom_killed:
+    if async_submit:
+        status = "running"
+        display_message = f"Job criado: {parsed['job_name']}. Processamento em andamento."
+    elif oom_killed:
         status = "failed"
         display_message = "A execução excedeu o limite de memória (OOMKilled). Aumente a RAM e tente novamente."
     elif effective_success:
@@ -676,7 +684,7 @@ def execute_job_from_source(
         status=status,
         language=language,
         started_at=started_at,
-        finished_at=finished_at,
+        finished_at=None if async_submit else finished_at,
         has_data_source=has_data_source,
         user_id=current_user["id"],
         rerun_from_id=rerun_from_id,
@@ -685,7 +693,8 @@ def execute_job_from_source(
     )
 
     return {
-        "success": effective_success,
+        "success": effective_success if not async_submit else False,
+        "status": status,
         "returncode": result.returncode,
         "run_id": run_id,
         "run_name": req.run_name or req.job_base_name,
@@ -1239,6 +1248,109 @@ def soft_delete_job_run(run_id: int, request: Request):
     return {"success": True}
 
 
+# Asynchronous hybrid execution (persistent metadata in NFS).
+from hybrid_runner import HybridRunRequest, create_hybrid, get_hybrid
+
+
+@app.post("/run/hybrid")
+def run_hybrid(req: HybridRunRequest, request: Request):
+    return create_hybrid(req, get_current_user_or_401(request))
+
+
+@app.get("/run/hybrid/{run_id}")
+def hybrid_status(run_id: str, request: Request):
+    return get_hybrid(run_id, get_current_user_or_401(request))
+
+
+# Long-running single-language jobs. Existing synchronous routes stay compatible.
+@app.post("/run/python/async")
+def run_python_async(req: JobFromSourceRequest, request: Request):
+    return execute_job_from_source(req=req, request=request, forced_language="python", async_submit=True)
+
+
+@app.post("/run/r/async")
+def run_r_async(req: JobFromSourceRequest, request: Request):
+    return execute_job_from_source(req=req, request=request, forced_language="r", async_submit=True)
+
+
+@app.get("/job-runs/{run_id}/status")
+def get_single_job_status(run_id: int, request: Request):
+    user = get_current_user_or_401(request)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT job_name, status, result_path, user_id, finished_at
+                FROM job_runs WHERE id=%s AND deleted_at IS NULL
+            """, (run_id,))
+            row = cur.fetchone()
+            if not row or not can_access_owned_resource(user, row[3]):
+                raise HTTPException(status_code=404, detail="Execução não encontrada")
+
+            job_name, stored_status, result_path, owner_id, finished_at = row
+            if stored_status in ("completed", "failed"):
+                return {"run_id": run_id, "job_name": job_name,
+                        "status": stored_status, "result_path": result_path,
+                        "success": stored_status == "completed"}
+
+            proc = subprocess.run(
+                ["kubectl", "get", "job", job_name, "-n", "analytics-jobs", "-o", "json"],
+                capture_output=True, text=True, timeout=15, check=False,
+            )
+            if proc.returncode != 0:
+                # Jobs may expire via TTL; prefer the persisted result if present.
+                result = _read_single_result(result_path)
+                if result is None:
+                    return {"run_id": run_id, "job_name": job_name,
+                            "status": "unknown", "success": False,
+                            "display_message": "Job não encontrado; resultado ainda indisponível"}
+                complete = result.get("status") == "success" and result.get("returncode", 0) == 0
+                state = "completed" if complete else "failed"
+            else:
+                job = json.loads(proc.stdout)
+                jstatus = job.get("status", {})
+                complete = bool(jstatus.get("succeeded", 0))
+                failed = bool(jstatus.get("conditions") and any(
+                    c.get("type") == "Failed" and c.get("status") == "True"
+                    for c in jstatus.get("conditions", [])))
+                if complete:
+                    result = _read_single_result(result_path)
+                    if result is None:
+                        return {"run_id": run_id, "job_name": job_name,
+                                "status": "running", "success": False,
+                                "display_message": "Job concluído; aguardando result.json"}
+                    complete = result.get("status") == "success" and result.get("returncode", 0) == 0
+                    state = "completed" if complete else "failed"
+                elif failed:
+                    state = "failed"
+                else:
+                    return {"run_id": run_id, "job_name": job_name,
+                            "status": "running", "success": False,
+                            "display_message": "Job em processamento"}
+
+            runtime = inspect_job_runtime(job_name)
+            cur.execute("""
+                UPDATE job_runs SET status=%s, finished_at=COALESCE(finished_at, NOW()),
+                  node_name=COALESCE(%s, node_name), runtime_details=%s
+                WHERE id=%s AND status NOT IN ('completed','failed')
+            """, (state, runtime.get("node_name"), json.dumps(runtime), run_id))
+        conn.commit()
+    return {"run_id": run_id, "job_name": job_name, "status": state,
+            "success": state == "completed", "result_path": result_path,
+            "display_message": "Execução concluída" if state == "completed" else "Execução falhou"}
+
+
+def _read_single_result(path):
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 @app.post("/run/python/by-source")
 def run_python_job_by_source(req: JobFromSourceRequest, request: Request):
     return execute_job_from_source(
@@ -1337,3 +1449,10 @@ from data_sources_v2 import register_data_source_routes_v2
 from auth_routes import register_auth_routes
 register_auth_routes(app)
 register_data_source_routes_v2(app)
+
+from admin_routes import register_admin_routes
+register_admin_routes(app)
+
+# Analytics API 2.8 - Kubernetes Metrics Server
+from metrics_routes import register_metrics_routes
+register_metrics_routes(app)

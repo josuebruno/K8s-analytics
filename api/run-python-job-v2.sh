@@ -129,6 +129,11 @@ kubectl apply -f "${MANIFEST_FILE}"
 
 echo "Job criado: ${JOB_NAME}"
 
+if [[ "${ASYNC_SUBMIT:-0}" == "1" ]]; then
+  echo "${SHARED_ROOT}/jobs/${OUTPUT_SUBDIR}/result.json"
+  exit 0
+fi
+
 kubectl wait \
   --for=condition=complete \
   --timeout=300s \

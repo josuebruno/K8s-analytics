@@ -1,0 +1,166 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "CronJob",
+  "metadata": {
+    "name": "analytics-individual-reconciler",
+    "namespace": "analytics-system",
+    "labels": {
+      "app": "analytics-individual-reconciler",
+      "component": "job-monitoring"
+    }
+  },
+  "spec": {
+    "schedule": "* * * * *",
+    "suspend": false,
+    "concurrencyPolicy": "Forbid",
+    "startingDeadlineSeconds": 50,
+    "successfulJobsHistoryLimit": 3,
+    "failedJobsHistoryLimit": 3,
+    "jobTemplate": {
+      "spec": {
+        "backoffLimit": 0,
+        "activeDeadlineSeconds": 240,
+        "ttlSecondsAfterFinished": 600,
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "analytics-individual-reconciler"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "analytics-api",
+            "restartPolicy": "Never",
+            "nodeSelector": {
+              "analytics-worker": "true"
+            },
+            "imagePullSecrets": [
+              {
+                "name": "harbor-analytics"
+              }
+            ],
+            "containers": [
+              {
+                "name": "reconciler",
+                "image": "harbor.ipea.gov.br/desenvolvimento/analytics-api:2.6",
+                "imagePullPolicy": "IfNotPresent",
+                "command": [
+                  "/bin/sh",
+                  "-ec"
+                ],
+                "args": [
+                  "mkdir -p /root/.kube\n\ncat > /root/.kube/config <<KCFG\napiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n    server: https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS}\n  name: in-cluster\ncontexts:\n- context:\n    cluster: in-cluster\n    namespace: analytics-jobs\n    user: serviceaccount\n  name: in-cluster\ncurrent-context: in-cluster\nusers:\n- name: serviceaccount\n  user:\n    tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token\nKCFG\n\nexec python /app/individual_reconciler.py --max-runs 100\n"
+                ],
+                "env": [
+                  {
+                    "name": "DB_HOST",
+                    "value": "analytics-postgres.analytics-system.svc.cluster.local"
+                  },
+                  {
+                    "name": "DB_PORT",
+                    "value": "5432"
+                  },
+                  {
+                    "name": "DB_NAME",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "POSTGRES_DB",
+                        "name": "analytics-postgres-secret"
+                      }
+                    }
+                  },
+                  {
+                    "name": "DB_USER",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "POSTGRES_USER",
+                        "name": "analytics-postgres-secret"
+                      }
+                    }
+                  },
+                  {
+                    "name": "DB_PASSWORD",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "key": "POSTGRES_PASSWORD",
+                        "name": "analytics-postgres-secret"
+                      }
+                    }
+                  },
+                  {
+                    "name": "AD_HOST",
+                    "value": "10.1.1.70"
+                  },
+                  {
+                    "name": "AD_PORT",
+                    "value": "389"
+                  },
+                  {
+                    "name": "AD_USE_SSL",
+                    "value": "false"
+                  },
+                  {
+                    "name": "AD_DOMAIN",
+                    "value": "IPEA.GOV.BR"
+                  },
+                  {
+                    "name": "AD_BASE_DN",
+                    "value": "DC=ipea,DC=gov,DC=br"
+                  },
+                  {
+                    "name": "AD_GROUP_CN",
+                    "value": "GestaoAD"
+                  },
+                  {
+                    "name": "SESSION_COOKIE_NAME",
+                    "value": "analytics_session"
+                  },
+                  {
+                    "name": "SESSION_TTL_HOURS",
+                    "value": "12"
+                  },
+                  {
+                    "name": "SHARED_ROOT",
+                    "value": "/shared"
+                  },
+                  {
+                    "name": "SHARED_NFS_SERVER",
+                    "value": "10.100.58.50"
+                  },
+                  {
+                    "name": "SHARED_NFS_EXPORT",
+                    "value": "/1"
+                  }
+                ],
+                "envFrom": [],
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "128Mi"
+                  },
+                  "limits": {
+                    "cpu": "500m",
+                    "memory": "512Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "shared-data",
+                    "mountPath": "/shared"
+                  }
+                ]
+              }
+            ],
+            "volumes": [
+              {
+                "name": "shared-data",
+                "persistentVolumeClaim": {
+                  "claimName": "analytics-shared-pvc"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
